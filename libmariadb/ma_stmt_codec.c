@@ -171,6 +171,7 @@ static long long my_strtoll(const char *str, size_t len, const char **end, int *
 
   if (p == end_str)
   {
+    *end = p;
     *err = ERANGE;
     return 0;
   }
@@ -209,6 +210,7 @@ static long long my_strtoll(const char *str, size_t len, const char **end, int *
   return -1LL * uval;
 }
 
+
 static long long my_atoll(const char *str, const char *end_str, int *error)
 {
   const char *p=str;
@@ -216,18 +218,36 @@ static long long my_atoll(const char *str, const char *end_str, int *error)
   long long ret;
   while (p < end_str && isspace(*p))
     p++;
+
   ret = my_strtoll(p, end_str - p, &end, error);
+
+  while(end < end_str && isspace(*end))
+   end++;
+
+  if(end != end_str)
+    *error= 1;
+
   return ret;
 }
+
 
 static unsigned long long my_atoull(const char *str, const char *end_str, int *error)
 {
   const char *p = str;
   const char *end;
   unsigned long long ret;
+
   while (p < end_str && isspace(*p))
     p++;
+
   ret = my_strtoull(p, end_str - p, &end, error);
+
+  while(end < end_str && isspace(*end))
+   end++;
+
+  if(end != end_str)
+    *error= 1;
+
   return ret;
 }
 
@@ -624,21 +644,28 @@ static void convert_from_long(MYSQL_BIND *r_param, const MYSQL_FIELD *field, lon
       char *buffer;
       char *endptr;
       uint len;
+      my_bool zf_truncated= 0;
 
       buffer= alloca(MAX(field->length, 22));
       endptr= ma_ll2str(val, buffer, is_unsigned ? 10 : -10);
       len= (uint)(endptr - buffer);
 
       /* check if field flag is zerofill */
-      if (field->flags & ZEROFILL_FLAG &&
-          len < field->length && len < r_param->buffer_length)
+      if (field->flags & ZEROFILL_FLAG)
       {
-        ma_bmove_upp(buffer + field->length, buffer + len, len);
-        /* coverity [bad_memset] */
-        memset((void*) buffer, (int) '0', field->length - len);
-        len= field->length;
+        uint display_width= MAX(field->length, len);
+        if (display_width < r_param->buffer_length)
+        {
+          ma_bmove_upp(buffer + display_width, buffer + len, len);
+          /* coverity [bad_memset] */
+          memset((void*) buffer, (int) '0', display_width - len);
+          len= display_width;
+        }
+        else
+          zf_truncated= 1;
       }
       convert_froma_string(r_param, buffer, len);
+      *r_param->error+= zf_truncated;
     }
     break;
   }

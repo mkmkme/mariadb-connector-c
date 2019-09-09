@@ -4275,13 +4275,7 @@ static int test_conc179(MYSQL *mysql)
 {
   MYSQL_STMT *stmt;
   int rc;
-  const char *stmtstr= "CREATE TABLE t1 (`blurb_id` int NOT NULL DEFAULT 0, `blurb` text default '', PRIMARY KEY (blurb_id)) ENGINE='FEDERATED' DEFAULT CHARSET=latin1 CONNECTION='mysql://root@127.0.0.1:$SLAVE_MYPORT/test/t1'";
-
-  rc= mysql_query(mysql, "set sql_mode=''");
-  check_mysql_rc(rc, mysql);
-
-  rc= mysql_query(mysql, "DROP TABLE IF EXISTS t1");
-  check_mysql_rc(rc, mysql);
+  const char *stmtstr= "select 1 as ' '";
 
   stmt= mysql_stmt_init(mysql);
   rc= mysql_stmt_prepare(stmt, SL(stmtstr));
@@ -4289,8 +4283,8 @@ static int test_conc179(MYSQL *mysql)
 
   if (mysql_get_server_version(mysql) >= 100100)
   {
-    FAIL_IF(mysql_warning_count(mysql) < 2, "expected 2 or more warnings");
-    FAIL_IF(mysql_stmt_warning_count(stmt) < 2, "expected 2 or more warnings");
+    FAIL_IF(mysql_warning_count(mysql) < 1, "expected 1 or more warnings");
+    FAIL_IF(mysql_stmt_warning_count(stmt) < 1, "expected 1 or more warnings");
   }
 
   mysql_stmt_close(stmt);
@@ -4658,6 +4652,62 @@ static int equal_MYSQL_TIME(MYSQL_TIME *tm1, MYSQL_TIME *tm2)
     tm1->second_part==tm2->second_part && tm1->time_type==tm2->time_type && tm1->year==tm2->year;
 }
 
+static int test_str_to_int(MYSQL *mysql)
+{
+ int i;
+ struct st_atoi_test{
+    const char *str_value;
+    int int_value;
+    int rc;
+  } atoi_tests[]=
+  {
+    {"0", 0, 0},
+    {" 1",1, 0},
+    {"123 ",123, 0},
+    {"10.2",10, MYSQL_DATA_TRUNCATED},
+    {"a", 0, MYSQL_DATA_TRUNCATED},
+    {"1 2 3", 1, MYSQL_DATA_TRUNCATED},
+    {NULL, 0, 0}
+  };
+
+  for(i=0; atoi_tests[i].str_value; i++)
+  {
+    int rc;
+    MYSQL_STMT *stmt;
+    MYSQL_BIND bind[1];
+    struct st_atoi_test *test= &atoi_tests[i];
+    char sql[256];
+    int int_value;
+
+    snprintf(sql, sizeof(sql), "SELECT '%s'",test->str_value);
+
+    stmt= mysql_stmt_init(mysql);
+
+    rc= mysql_stmt_prepare(stmt, sql, (ulong)strlen(sql));
+    check_stmt_rc(rc, stmt);
+    rc= mysql_stmt_execute(stmt);
+    check_stmt_rc(rc, stmt);
+    rc= mysql_stmt_store_result(stmt);
+
+    memset(bind, 0, sizeof(MYSQL_BIND));
+    bind[0].buffer_type= MYSQL_TYPE_LONG;
+    bind[0].buffer= &int_value;
+    bind[0].buffer_length= sizeof(int_value);
+
+    rc= mysql_stmt_bind_result(stmt, bind);
+    check_stmt_rc(rc, stmt);
+    rc= mysql_stmt_fetch(stmt);
+
+    diag("test: str='%s', expected/returned value =%d/%d, expected/returned rc=%d/%d",
+      test->str_value, test->int_value, int_value, test->rc, rc);
+    FAIL_UNLESS(rc == test->rc, "unexpected return code");
+    FAIL_UNLESS(int_value == test->int_value, "unexpected int value");
+    mysql_stmt_close(stmt);
+  }
+  return OK;
+}
+
+
 static int test_codbc138(MYSQL *mysql)
 {
   int rc;
@@ -4953,11 +5003,121 @@ static int test_conc_fraction(MYSQL *mysql)
   return OK;
 }
 
+static int test_zerofill_1byte(MYSQL *mysql)
+{
+  MYSQL_STMT *stmt= mysql_stmt_init(mysql);
+  int rc;
+  MYSQL_BIND bind;
+  char buffer[3];
+
+  rc= mysql_query(mysql, "DROP TABLE IF EXISTS t1");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_query(mysql, "CREATE TABLE t1 (a int zerofill)");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_query(mysql, "INSERT INTO t1 VALUES(1)");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_stmt_prepare(stmt, SL("SELECT a FROM t1"));
+  check_stmt_rc(rc, stmt);
+
+  rc= mysql_stmt_execute(stmt);
+  check_stmt_rc(rc, stmt);
+
+  memset(&bind, 0, sizeof(MYSQL_BIND));
+  bind.buffer_type= MYSQL_TYPE_STRING;
+  bind.buffer= buffer;
+  bind.buffer_length= 1;
+
+  rc= mysql_stmt_bind_result(stmt, &bind);
+
+  rc= mysql_stmt_fetch(stmt);
+  FAIL_IF(rc != 101, "expected truncation warning");
+
+  mysql_stmt_close(stmt);
+  rc= mysql_query(mysql, "DROP TABLE t1");
+  check_mysql_rc(rc, mysql);
+
+  return OK;
+}
+
+static int test_conc424(MYSQL *mysql)
+{
+  int rc;
+  MYSQL_STMT *stmt;
+  my_bool max_len= 1;
+
+  rc= mysql_query(mysql, "DROP TABLE IF EXISTS test_table1");
+  check_mysql_rc(rc, mysql);
+  rc= mysql_query(mysql, "CREATE TABLE test_table1 (test_int INT, b int)");
+  check_mysql_rc(rc, mysql);
+  rc= mysql_query(mysql, "INSERT INTO test_table1 values(10,11),(11,12)");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_query(mysql, "DROP PROCEDURE IF EXISTS testCursor");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_query(mysql, "CREATE PROCEDURE testCursor()\n"
+                  "BEGIN\n"
+                  "DECLARE test_int INT;\n"
+                  "DECLARE b INT;\n"
+                  "DECLARE done INT DEFAULT FALSE;\n"
+                  "DECLARE testCursor CURSOR\n"
+                  "FOR\n"
+                  "SELECT test_int,b FROM test_table1;\n"
+                  "DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;\n"
+                  "OPEN testCursor;\n"
+
+                  " read_loop: LOOP\n"
+                  "   FETCH testCursor INTO test_int, b;\n"
+                  "   IF done THEN\n"
+                  "     LEAVE read_loop;\n"
+                  "   END IF;\n"
+                  "   SELECT test_int,b;"
+                  " END LOOP;\n"
+                  "CLOSE testCursor;\n"
+                  "END");
+  check_mysql_rc(rc, mysql);
+
+  stmt= mysql_stmt_init(mysql);
+  rc= mysql_stmt_prepare(stmt, SL("CALL testCursor()"));
+  check_stmt_rc(rc, stmt);
+
+  rc= mysql_stmt_attr_set(stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &max_len);
+  check_stmt_rc(rc, stmt);
+
+  rc= mysql_stmt_execute(stmt);
+  check_stmt_rc(rc, stmt);
+
+  do {
+    if (mysql_stmt_field_count(stmt))
+    {
+      MYSQL_RES *res= mysql_stmt_result_metadata(stmt);
+      rc= mysql_stmt_fetch(stmt);
+      FAIL_IF(rc, "Wrong return code");
+      mysql_free_result(res);
+    }
+    rc= mysql_stmt_next_result(stmt);
+
+  } while (!rc);
+
+  mysql_stmt_close(stmt);
+  rc= mysql_query(mysql, "DROP PROCEDURE testCursor");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_query(mysql, "DROP TABLE test_table1");
+  check_mysql_rc(rc, mysql);
+
+  return OK;
+}
 
 struct my_tests_st my_tests[] = {
+  {"test_conc424", test_conc424, TEST_CONNECTION_NEW, 0, NULL, NULL},
   {"test_conc344", test_conc344, TEST_CONNECTION_NEW, 0, NULL, NULL},
   {"test_conc334", test_conc334, TEST_CONNECTION_NEW, 0, NULL, NULL},
   {"test_compress", test_compress, TEST_CONNECTION_NEW, CLIENT_COMPRESS, NULL, NULL},
+  {"test_zerofill_1byte", test_zerofill_1byte, TEST_CONNECTION_DEFAULT, 0, NULL, NULL},
   {"test_codbc138", test_codbc138, TEST_CONNECTION_DEFAULT, 0, NULL, NULL},
   {"test_conc208", test_conc208, TEST_CONNECTION_DEFAULT, 0, NULL, NULL},
   {"test_mdev14165", test_mdev14165, TEST_CONNECTION_DEFAULT, 0, NULL, NULL},
@@ -5029,6 +5189,7 @@ struct my_tests_st my_tests[] = {
   {"test_stiny_bug", test_stiny_bug, TEST_CONNECTION_DEFAULT, 0, NULL , NULL},
   {"test_bug53311", test_bug53311, TEST_CONNECTION_NEW, 0, NULL , NULL},
   {"test_conc_fraction", test_conc_fraction, TEST_CONNECTION_DEFAULT, 0, NULL , NULL},
+  {"test_str_to_int", test_str_to_int, TEST_CONNECTION_DEFAULT, 0, NULL, NULL},
   {NULL, NULL, 0, 0, NULL, NULL}
 };
 

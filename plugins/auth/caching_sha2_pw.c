@@ -21,12 +21,14 @@
 #endif
 
 #ifdef _WIN32
-#if !defined(HAVE_OPENSSL)
 #define HAVE_WINCRYPT
-#endif
+#undef HAVE_OPENSSL
+#undef HAVE_GNUTLS
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "ws2_32.lib")
 #endif
 
-#if defined(HAVE_OPENSSL) || defined(HAVE_SCHANNEL) || defined(HAVE_GNUTLS)
+#if defined(HAVE_OPENSSL) || defined(HAVE_WINCRYPT) || defined(HAVE_GNUTLS)
 
 #include <ma_global.h>
 #include <mysql.h>
@@ -48,7 +50,7 @@
 #include <openssl/err.h>
 #elif defined(HAVE_GNUTLS)
 #include <gnutls/gnutls.h>
-#elif defined(HAVE_SCHANNEL)
+#elif defined(HAVE_WINCRYPT)
 #include <windows.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
@@ -86,7 +88,7 @@ static int ma_sha256_scramble(unsigned char *scramble, size_t scramble_len,
   unsigned char digest1[MA_SHA256_HASH_SIZE],
                 digest2[MA_SHA256_HASH_SIZE],
                 new_scramble[MA_SHA256_HASH_SIZE];
-#ifdef HAVE_SCHANNEL
+#ifdef HAVE_WINCRYPT
   MA_HASH_CTX myctx;
   MA_HASH_CTX *ctx= &myctx;
 #else
@@ -105,7 +107,7 @@ static int ma_sha256_scramble(unsigned char *scramble, size_t scramble_len,
   ma_hash_input(ctx, source, source_len);
   ma_hash_result(ctx, digest1);
   ma_hash_free(ctx);
-#ifndef HAVE_SCHANNEL
+#ifndef HAVE_WINCRYPT
   ctx = NULL;
 #endif
 
@@ -115,7 +117,7 @@ static int ma_sha256_scramble(unsigned char *scramble, size_t scramble_len,
   ma_hash_input(ctx, digest1, MA_SHA256_HASH_SIZE);
   ma_hash_result(ctx, digest2);
   ma_hash_free(ctx);
-#ifndef HAVE_SCHANNEL
+#ifndef HAVE_WINCRYPT
   ctx = NULL;
 #endif
 
@@ -162,11 +164,11 @@ struct st_mysql_client_plugin_AUTHENTICATION _mysql_client_plugin_declaration_ =
   auth_caching_sha2_client
 };
 
-#ifdef HAVE_SCHANNEL
+#ifdef HAVE_WINCRYPT
 static LPBYTE ma_load_pem(const char *buffer, DWORD *buffer_len)
 {
   LPBYTE der_buffer= NULL;
-  DWORD der_buffer_length;
+  DWORD der_buffer_length= 0;
 
   if (buffer_len == NULL || *buffer_len == 0)
     return NULL;
@@ -194,7 +196,8 @@ end:
 }
 #endif
 
-char *load_pub_key_file(const char *filename, int *pub_key_size)
+#ifndef HAVE_GNUTLS
+static char *load_pub_key_file(const char *filename, int *pub_key_size)
 {
   FILE *fp= NULL;
   char *buffer= NULL;
@@ -230,7 +233,7 @@ end:
   }
   return buffer;
 }
-
+#endif
 
 static int auth_caching_sha2_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
 {
@@ -253,7 +256,7 @@ static int auth_caching_sha2_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
 #if defined(HAVE_OPENSSL)
   RSA *pubkey= NULL;
   BIO *bio;
-#elif defined(HAVE_SCHANNEL)
+#elif defined(HAVE_WINCRYPT)
   BCRYPT_KEY_HANDLE pubkey= 0;
   BCRYPT_OAEP_PADDING_INFO paddingInfo;
   LPBYTE der_buffer= NULL;
@@ -271,14 +274,6 @@ static int auth_caching_sha2_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
 
   memmove(mysql->scramble_buff, packet, SCRAMBLE_LENGTH);
   mysql->scramble_buff[SCRAMBLE_LENGTH]= 0;
-
-  /* if a tls session is active we need to send plain password */
-  if (mysql->client_flag & CLIENT_SSL)
-  {
-    if (vio->write_packet(vio, (unsigned char *)mysql->passwd, (int)strlen(mysql->passwd) + 1))
-      return CR_ERROR;
-    return CR_OK;
-  }
 
   /* send empty packet if no password was provided */
   if (!mysql->passwd || !mysql->passwd[0])
@@ -347,7 +342,7 @@ static int auth_caching_sha2_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
       rsa_size= RSA_size(pubkey);
     BIO_free(bio);
     ERR_clear_error();
-#elif defined(HAVE_SCHANNEL)
+#elif defined(HAVE_WINCRYPT)
     der_buffer_len= packet_length;
     /* Load pem and convert it to binary object. New length will be returned
        in der_buffer_len */
@@ -385,7 +380,7 @@ static int auth_caching_sha2_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
 #if defined(HAVE_OPENSSL)
     if (RSA_public_encrypt(pwlen, (unsigned char *)passwd, rsa_enc_pw, pubkey, RSA_PKCS1_OAEP_PADDING) < 0)
       goto error;
-#elif defined(HAVE_SCHANNEL)
+#elif defined(HAVE_WINCRYPT)
     ZeroMemory(&paddingInfo, sizeof(paddingInfo));
     paddingInfo.pszAlgId = BCRYPT_SHA1_ALGORITHM;
     if ((rc= BCryptEncrypt(pubkey, (PUCHAR)passwd, pwlen, &paddingInfo, NULL, 0, rsa_enc_pw,
@@ -410,7 +405,7 @@ error:
 #if defined(HAVE_OPENSSL)
   if (pubkey)
     RSA_free(pubkey);
-#elif defined(HAVE_SCHANNEL)
+#elif defined(HAVE_WINCRYPT)
   if (pubkey)
     BCryptDestroyKey(pubkey);
   if (publicKeyInfo)
@@ -447,7 +442,7 @@ static int auth_caching_sha2_init(char *unused1 __attribute__((unused)),
     int unused3     __attribute__((unused)),
     va_list unused4 __attribute__((unused)))
 {
-#if defined(HAVE_SCHANNEL)
+#if defined(HAVE_WINCRYPT)
   BCryptOpenAlgorithmProvider(&Sha256Prov, BCRYPT_SHA256_ALGORITHM, NULL, 0);
   BCryptOpenAlgorithmProvider(&RsaProv, BCRYPT_RSA_ALGORITHM, NULL, 0);
 #endif
@@ -458,7 +453,7 @@ static int auth_caching_sha2_init(char *unused1 __attribute__((unused)),
 /* {{{ auth_caching_sha2_deinit */
 static int auth_caching_sha2_deinit()
 {
-#if defined(HAVE_SCHANNEL)
+#if defined(HAVE_WINCRYPT)
   BCryptCloseAlgorithmProvider(Sha256Prov, 0);
   BCryptCloseAlgorithmProvider(RsaProv, 0);
 #endif
